@@ -1,0 +1,134 @@
+name: Temps WAL-G GC hotfix (Linux amd64)
+
+on:
+  push:
+    branches:
+      - codex/temps-walg-gc-fix
+    paths:
+      - .github/workflows/temps-walg-gc-hotfix.yml
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: 36d68029f821bb43c1958321646659b32970d78c
+  PATCH_SHA: 3d3ea10d300f7cdbe7d36d9ae0ca1e1b90318a75
+  TEMPS_VERSION: v0.1.0-nightly.20261109.36d68029f
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  targeted-tests:
+    name: WAL-G deletion tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.PATCH_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify exact source patch
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PATCH_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" "$PATCH_SHA")" = "crates/temps-backup/src/services/backup/walg_deletion.rs"
+          git diff --check "$BASE_SHA" "$PATCH_SHA"
+          grep -Fq '"timeout -k 5s 180s wal-g delete garbage ARCHIVES --confirm",' crates/temps-backup/src/services/backup/walg_deletion.rs
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libssl-dev protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned upstream action
+        with:
+          toolchain: 1.99.1
+
+      - name: Run focused WAL-G deletion tests
+        run: cargo test --locked -p temps-backup --lib walg_deletion::tests -- --test-threads=2
+
+  build-linux-amd64:
+    name: Build production binary
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.PATCH_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify exact source patch
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PATCH_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" "$PATCH_SHA")" = "crates/temps-backup/src/services/backup/walg_deletion.rs"
+          git diff --check "$BASE_SHA" "$PATCH_SHA"
+          grep -Fq '"timeout -k 5s 180s wal-g delete garbage ARCHIVES --confirm",' crates/temps-backup/src/services/backup/walg_deletion.rs
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libssl-dev protobuf-compiler musl-tools
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned upstream action
+        with:
+          toolchain: 1.99.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+          no-cache: true
+
+      - name: Build embedded web assets
+        run: |
+          cargo install wasm-pack --version 0.15.0 --locked
+          (cd crates/temps-captcha-wasm && bun run build)
+          (cd web && bun install --frozen-lockfile)
+          (cd web && RSBUILD_OUTPUT_PATH="$GITHUB_WORKSPACE/crates/temps-cli/dist" bun run build)
+          test -s crates/temps-cli/dist/index.html
+
+      - name: Verify pinned runtime image manifest
+        run: |
+          set -euo pipefail
+          mkdir -p release-inputs
+          curl --fail --location --retry 3 --silent --show-error \
+            'https://github.com/gotempsh/temps/releases/download/v0.1.0-nightly.20261109.36d68029f/runtime-images.json' \
+            -o release-inputs/runtime-images.json
+          echo 'b00511ba9e9b81e85d9250fc6b112d1440c1a30c942e31eaaa39bee89dc06171  release-inputs/runtime-images.json' | sha256sum --check
+
+      - name: Build and check Linux amd64 binary
+        env:
+          SKIP_WEB_BUILD: "1"
+          TEMPS_RELEASE_IMAGE_MANIFEST: ${{ github.workspace }}/release-inputs/runtime-images.json
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --bin temps
+          strip target/release/temps
+          file target/release/temps
+          file target/release/temps | grep -q 'ELF 64-bit.*x86-64'
+          target/release/temps --version
+
+      - name: Package with provenance and digest
+        run: |
+          set -euo pipefail
+          mkdir -p package
+          cp target/release/temps package/temps
+          cp release-inputs/runtime-images.json package/runtime-images.json
+          printf '%s\n' "$PATCH_SHA" > package/SOURCE_COMMIT
+          (cd package && sha256sum temps runtime-images.json SOURCE_COMMIT > SHA256SUMS)
+          tar -czf temps-gc-hotfix-linux-amd64.tar.gz -C package temps runtime-images.json SOURCE_COMMIT SHA256SUMS
+          sha256sum temps-gc-hotfix-linux-amd64.tar.gz > temps-gc-hotfix-linux-amd64.tar.gz.sha256
+          cat temps-gc-hotfix-linux-amd64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: temps-gc-hotfix-linux-amd64
+          path: |
+            temps-gc-hotfix-linux-amd64.tar.gz
+            temps-gc-hotfix-linux-amd64.tar.gz.sha256
+          retention-days: 3
