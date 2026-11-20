@@ -717,7 +717,7 @@ impl BackupService {
         let garbage = crate::engines::postgres_walg::run_walg_exec(
             &docker,
             container,
-            "timeout -k 5s 35s wal-g delete garbage ARCHIVES",
+            "timeout -k 5s 180s wal-g delete garbage ARCHIVES --confirm",
             &env,
             &cancellation,
         )
